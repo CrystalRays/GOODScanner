@@ -367,9 +367,8 @@ impl ArtifactScannerWorker {
             }
 
             let model: &Box<dyn ImageToText<RgbImage> + Send + Sync> = self.paddle_model.as_ref().expect("paddle_model should be initialized for equip recognition");
-            // Resize equip region to fixed size (320x48) to match Python preprocessing, then mark as preprocessed
-            let fixed = image::imageops::resize(&raw_img, 320, 48, image::imageops::FilterType::Triangle);
-            model.image_to_text(&fixed, true)?
+            // Use the model's internal preprocessing which now handles low-resolution images with padding
+            model.image_to_text(&raw_img, false)?
         };
 
         anyhow::Ok(GenshinArtifactScanResult {
