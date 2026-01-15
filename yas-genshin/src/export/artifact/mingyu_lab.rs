@@ -143,6 +143,8 @@ impl ArtifactSetName {
             ArtifactSetName::LongNightsOath => "long_nights_oath",
             ArtifactSetName::SpinMoonSerenade => "spin_moon_serenade",
             ArtifactSetName::RealmMirrorNight => "realm_mirror_night",
+            ArtifactSetName::AubadeOfMorningstarAndMoon => "aubade_of_morningstar_and_moon",
+            ArtifactSetName::ADayCarvedFromRisingWinds => "a_day_carved_from_rising_winds",
 
             // Not supported by Mingyulab
             ArtifactSetName::Adventurer => unreachable!(),

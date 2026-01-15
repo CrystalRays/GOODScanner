@@ -98,6 +98,8 @@ pub enum ArtifactSetName {
     FinaleOfTheDeepGalleries,
     SpinMoonSerenade,
     RealmMirrorNight,
+    AubadeOfMorningstarAndMoon,
+    ADayCarvedFromRisingWinds,
 }
 
 #[derive(Debug, Clone)]
@@ -454,6 +456,10 @@ impl ArtifactSetName {
             "流离者的晶泪" | "流离者的晶淚" | "受福者的白羽" | "祭霜者的迷狂" | "至纯者的欢荣" | "司信者的圣冕" => Some(ArtifactSetName::SpinMoonSerenade),
             // 穹境示现之夜
             "渴真之花" | "深罪之羽" | "谕告之钟" | "满溢之壶" | "永劫之冕" => Some(ArtifactSetName::RealmMirrorNight),
+            // 晨星与月的晓歌
+            "献与月的华梦" | "献与月的离光" | "献与月的终时" | "献与月的酹祭" | "献与月的银冕" => Some(ArtifactSetName::AubadeOfMorningstarAndMoon),
+            // 风起之日
+            "风花的箴铭" | "晨光的明誓" | "春律的片刻" | "未言的宴话" | "哀慕的恋歌" => Some(ArtifactSetName::ADayCarvedFromRisingWinds),
             _ => None,
         }
     }
@@ -475,6 +481,18 @@ impl ArtifactSlot {
             "谕告之钟" => Some(ArtifactSlot::Sand),
             "满溢之壶" => Some(ArtifactSlot::Goblet),
             "永劫之冕" => Some(ArtifactSlot::Head),
+            // 晨星与月的晓歌
+            "献与月的华梦" => Some(ArtifactSlot::Flower),
+            "献与月的离光" => Some(ArtifactSlot::Feather),
+            "献与月的终时" => Some(ArtifactSlot::Sand),
+            "献与月的酹祭" => Some(ArtifactSlot::Goblet),
+            "献与月的银冕" => Some(ArtifactSlot::Head),
+            // 风起之日
+            "风花的箴铭" => Some(ArtifactSlot::Flower),
+            "晨光的明誓" => Some(ArtifactSlot::Feather),
+            "春律的片刻" => Some(ArtifactSlot::Sand),
+            "未言的宴话" => Some(ArtifactSlot::Goblet),
+            "哀慕的恋歌" => Some(ArtifactSlot::Head),
             "磐陀裂生之花" => Some(ArtifactSlot::Flower),
             "嵯峨群峰之翼" => Some(ArtifactSlot::Feather),
             "星罗圭壁之晷" => Some(ArtifactSlot::Sand),

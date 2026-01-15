@@ -169,6 +169,8 @@ impl ArtifactSetName {
             ArtifactSetName::FinaleOfTheDeepGalleries => "FinaleOfTheDeepGalleries",
             ArtifactSetName::SpinMoonSerenade => "SpinMoonSerenade",
             ArtifactSetName::RealmMirrorNight => "RealmMirrorNight",
+            ArtifactSetName::AubadeOfMorningstarAndMoon => "AubadeOfMorningstarAndMoon",
+            ArtifactSetName::ADayCarvedFromRisingWinds => "ADayCarvedFromRisingWinds",
         }
     }
 }
