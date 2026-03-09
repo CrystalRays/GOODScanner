@@ -21,6 +21,10 @@ env_logger = "0.11"
 enigo = "0.1"
 reqwest = { version = "0.11", features = ["blocking", "json"] }
 edit-distance = "2.1"
+rayon = "1.7"
+indicatif = "0.17"
+indicatif-log-bridge = "0.2"
+strum_macros = "0.26"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-capture = "=1.0.65"
