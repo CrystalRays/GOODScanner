@@ -6,19 +6,17 @@ use image::RgbImage;
 use log::{error, info, warn};
 use regex::Regex;
 
-use yas::capture::{Capturer, GenericCapturer};
-use yas::game_info::GameInfo;
-use yas::ocr::{ImageToText, PPOCRModel};
-use yas::system_control::SystemControl;
+use yas::ocr::ImageToText;
 use yas::utils;
 
 use super::GoodCharacterScannerConfig;
 use crate::scanner::good_common::constants::*;
-use crate::scanner::good_common::coord_scaler::CoordScaler;
 use crate::scanner::good_common::fuzzy_match::fuzzy_match_map;
+use crate::scanner::good_common::game_controller::GenshinGameController;
 use crate::scanner::good_common::mappings::MappingManager;
-use crate::scanner::good_common::models::{GoodCharacter, GoodTalent};
+use crate::scanner::good_common::models::{DebugOcrField, DebugScanResult, GoodCharacter, GoodTalent};
 use crate::scanner::good_common::navigation;
+use crate::scanner::good_common::ocr_factory;
 use crate::scanner::good_common::stat_parser::level_to_ascension;
 
 /// Character scanner ported from GOODScanner/lib/character_scanner.js.
@@ -26,54 +24,24 @@ use crate::scanner::good_common::stat_parser::level_to_ascension;
 /// Uses binary-search constellation detection (max 3 clicks),
 /// talent adjustments (Tartaglia -1, C3/C5 bonus subtraction),
 /// and alternating scan direction for tab optimization.
+///
+/// The scanner holds only business logic (OCR model, mappings, config).
+/// The game controller is passed to `scan()` to share it across scanners.
 pub struct GoodCharacterScanner {
     config: GoodCharacterScannerConfig,
-    game_info: GameInfo,
-    scaler: CoordScaler,
-    capturer: Rc<dyn Capturer<RgbImage>>,
-    system_control: SystemControl,
     ocr_model: Box<dyn ImageToText<RgbImage> + Send>,
     mappings: Rc<MappingManager>,
 }
 
 impl GoodCharacterScanner {
-    fn get_image_to_text(backend: &str) -> Result<Box<dyn ImageToText<RgbImage> + Send>> {
-        match backend.to_lowercase().as_str() {
-            "paddlev3" | "ppocrv3" => {
-                let model_bytes = include_bytes!("../character_scanner/models/ch_PP-OCRv3_rec_infer.onnx");
-                let dict_str = include_str!("../character_scanner/models/ppocr_keys_v1.txt");
-                let mut dict_vec: Vec<String> = dict_str.lines().map(|l| l.trim().to_string()).collect();
-                dict_vec.push(String::from(" "));
-                let model = PPOCRModel::new(model_bytes, dict_vec)?;
-                Ok(Box::new(model))
-            }
-            _ => {
-                // Default to PPOCRv5
-                let model_bytes = include_bytes!("../character_scanner/models/PP-OCRv5_mobile_rec.onnx");
-                let dict_str = include_str!("../character_scanner/models/ppocrv5_dict.txt");
-                let mut dict_vec: Vec<String> = dict_str.lines().map(|l| l.trim().to_string()).collect();
-                dict_vec.push(String::from(" "));
-                let model = PPOCRModel::new(model_bytes, dict_vec)?;
-                Ok(Box::new(model))
-            }
-        }
-    }
-
     pub fn new(
         config: GoodCharacterScannerConfig,
-        game_info: GameInfo,
         mappings: Rc<MappingManager>,
     ) -> Result<Self> {
-        let ocr_model = Self::get_image_to_text(&config.ocr_backend)?;
-        let window_size = game_info.window.to_rect_usize().size();
-        let scaler = CoordScaler::new(window_size.width as u32, window_size.height as u32);
+        let ocr_model = ocr_factory::create_ocr_model(&config.ocr_backend)?;
 
         Ok(Self {
             config,
-            game_info,
-            scaler,
-            capturer: Rc::new(GenericCapturer::new()?),
-            system_control: SystemControl::new(),
             ocr_model,
             mappings,
         })
@@ -82,25 +50,8 @@ impl GoodCharacterScanner {
 
 impl GoodCharacterScanner {
     /// OCR a region in base 1920x1080 coordinates
-    fn ocr_rect(&self, rect: (f64, f64, f64, f64)) -> Result<String> {
-        navigation::ocr_region(
-            &self.game_info,
-            &self.scaler,
-            self.capturer.as_ref(),
-            self.ocr_model.as_ref(),
-            rect,
-        )
-    }
-
-    /// Click at base coordinates
-    fn click(&mut self, base_x: f64, base_y: f64) {
-        navigation::click_at(
-            &self.game_info,
-            &self.scaler,
-            &mut self.system_control,
-            base_x,
-            base_y,
-        );
+    fn ocr_rect(&self, ctrl: &GenshinGameController, rect: (f64, f64, f64, f64)) -> Result<String> {
+        ctrl.ocr_region(self.ocr_model.as_ref(), rect)
     }
 
     /// Parse character name and element from OCR text.
@@ -131,8 +82,8 @@ impl GoodCharacterScanner {
     /// OCR read character name and element, with one retry.
     ///
     /// Port of `readCharacterNameAndElement()` from character_scanner.js
-    fn read_name_and_element(&self) -> Result<(Option<String>, Option<String>, String)> {
-        let text = self.ocr_rect(CHAR_NAME_RECT)?;
+    fn read_name_and_element(&self, ctrl: &GenshinGameController) -> Result<(Option<String>, Option<String>, String)> {
+        let text = self.ocr_rect(ctrl, CHAR_NAME_RECT)?;
         let (name, element) = self.parse_name_and_element(&text);
 
         if name.is_some() {
@@ -142,7 +93,7 @@ impl GoodCharacterScanner {
         warn!("[character] first name match failed: \u{300C}{}\u{300D}, retrying...", text);
         utils::sleep(1000);
 
-        let text2 = self.ocr_rect(CHAR_NAME_RECT)?;
+        let text2 = self.ocr_rect(ctrl, CHAR_NAME_RECT)?;
         let (name2, element2) = self.parse_name_and_element(&text2);
         if name2.is_none() {
             warn!("[character] second name match failed: \u{300C}{}\u{300D}", text2);
@@ -153,8 +104,8 @@ impl GoodCharacterScanner {
     /// OCR read character level, returns (level, ascended).
     ///
     /// Port of `readCharacterLevel()` from character_scanner.js
-    fn read_level(&self) -> Result<(i32, bool)> {
-        let text = self.ocr_rect(CHAR_LEVEL_RECT)?;
+    fn read_level(&self, ctrl: &GenshinGameController) -> Result<(i32, bool)> {
+        let text = self.ocr_rect(ctrl, CHAR_LEVEL_RECT)?;
 
         let re = Regex::new(r"(\d+)\s*/\s*(\d+)")?;
         if let Some(caps) = re.captures(&text) {
@@ -173,9 +124,14 @@ impl GoodCharacterScanner {
     /// Click a constellation node and check if it's activated via OCR.
     ///
     /// Port of `isConstellationActivated()` from character_scanner.js
-    fn is_constellation_activated(&mut self, c_index: usize, is_first_click: bool) -> Result<bool> {
+    fn is_constellation_activated(
+        &self,
+        ctrl: &mut GenshinGameController,
+        c_index: usize,
+        is_first_click: bool,
+    ) -> Result<bool> {
         let click_y = CHAR_CONSTELLATION_Y_BASE + c_index as f64 * CHAR_CONSTELLATION_Y_STEP;
-        self.click(CHAR_CONSTELLATION_X, click_y);
+        ctrl.click_at(CHAR_CONSTELLATION_X, click_y);
 
         let delay = if is_first_click {
             self.config.tab_delay
@@ -184,7 +140,7 @@ impl GoodCharacterScanner {
         };
         utils::sleep(delay as u32);
 
-        let text = self.ocr_rect(CHAR_CONSTELLATION_ACTIVATE_RECT)?;
+        let text = self.ocr_rect(ctrl, CHAR_CONSTELLATION_ACTIVATE_RECT)?;
         // "已激活" means "Activated"
         Ok(text.contains("\u{5DF2}\u{6FC0}\u{6D3B}"))
     }
@@ -200,7 +156,8 @@ impl GoodCharacterScanner {
     ///
     /// Port of `readConstellationCount()` from character_scanner.js
     fn read_constellation_count(
-        &mut self,
+        &self,
+        ctrl: &mut GenshinGameController,
         character_name: &str,
         element: &Option<String>,
     ) -> Result<i32> {
@@ -209,30 +166,30 @@ impl GoodCharacterScanner {
             return Ok(0);
         }
 
-        self.click(CHAR_TAB_CONSTELLATION.0, CHAR_TAB_CONSTELLATION.1);
+        ctrl.click_at(CHAR_TAB_CONSTELLATION.0, CHAR_TAB_CONSTELLATION.1);
         utils::sleep(self.config.tab_delay as u32);
 
         let constellation;
 
-        let c3 = self.is_constellation_activated(2, true)?;
+        let c3 = self.is_constellation_activated(ctrl, 2, true)?;
         if !c3 {
-            let c2 = self.is_constellation_activated(1, false)?;
+            let c2 = self.is_constellation_activated(ctrl, 1, false)?;
             if !c2 {
-                let c1 = self.is_constellation_activated(0, false)?;
+                let c1 = self.is_constellation_activated(ctrl, 0, false)?;
                 constellation = if c1 { 1 } else { 0 };
             } else {
                 constellation = 2;
             }
         } else {
-            let c6 = self.is_constellation_activated(5, false)?;
+            let c6 = self.is_constellation_activated(ctrl, 5, false)?;
             if c6 {
                 constellation = 6;
             } else {
-                let c4 = self.is_constellation_activated(3, false)?;
+                let c4 = self.is_constellation_activated(ctrl, 3, false)?;
                 if !c4 {
                     constellation = 3;
                 } else {
-                    let c5 = self.is_constellation_activated(4, false)?;
+                    let c5 = self.is_constellation_activated(ctrl, 4, false)?;
                     constellation = if c5 { 5 } else { 4 };
                 }
             }
@@ -244,7 +201,7 @@ impl GoodCharacterScanner {
             if let Some(elem) = element {
                 if elem.contains('\u{5CA9}') {
                     // 岩 = Geo
-                    let c6_recheck = self.is_constellation_activated(5, false)?;
+                    let c6_recheck = self.is_constellation_activated(ctrl, 5, false)?;
                     if c6_recheck {
                         final_constellation = 6;
                         warn!("[character] Geo C6 recheck passed, corrected to C6");
@@ -253,7 +210,7 @@ impl GoodCharacterScanner {
             }
         }
 
-        self.system_control.key_press(enigo::Key::Escape).unwrap();
+        ctrl.key_press(enigo::Key::Escape);
         utils::sleep(self.config.tab_delay as u32);
 
         Ok(final_constellation)
@@ -279,9 +236,14 @@ impl GoodCharacterScanner {
     /// Read a single talent level by clicking the detail view.
     ///
     /// Port of `readTalentByClick()` from character_scanner.js
-    fn read_talent_by_click(&mut self, talent_index: usize, is_first: bool) -> Result<i32> {
+    fn read_talent_by_click(
+        &self,
+        ctrl: &mut GenshinGameController,
+        talent_index: usize,
+        is_first: bool,
+    ) -> Result<i32> {
         let click_y = CHAR_TALENT_FIRST_Y + talent_index as f64 * CHAR_TALENT_OFFSET_Y;
-        self.click(CHAR_TALENT_CLICK_X, click_y);
+        ctrl.click_at(CHAR_TALENT_CLICK_X, click_y);
 
         let delay = if is_first {
             self.config.tab_delay
@@ -290,7 +252,7 @@ impl GoodCharacterScanner {
         };
         utils::sleep(delay as u32);
 
-        let text = self.ocr_rect(CHAR_TALENT_LEVEL_RECT)?;
+        let text = self.ocr_rect(ctrl, CHAR_TALENT_LEVEL_RECT)?;
         let re = Regex::new(r"(\d+)")?;
         if let Some(caps) = re.captures(&text) {
             let v: i32 = caps[1].parse().unwrap_or(1);
@@ -305,26 +267,27 @@ impl GoodCharacterScanner {
     ///
     /// Port of `readTalentLevels()` from character_scanner.js
     fn read_talent_levels(
-        &mut self,
+        &self,
+        ctrl: &mut GenshinGameController,
         character_name: &str,
         skip_tab: bool,
     ) -> Result<(i32, i32, i32)> {
         if !skip_tab {
-            self.click(CHAR_TAB_TALENTS.0, CHAR_TAB_TALENTS.1);
+            ctrl.click_at(CHAR_TAB_TALENTS.0, CHAR_TAB_TALENTS.1);
             utils::sleep(self.config.tab_delay as u32);
         }
 
         let has_special = SPECIAL_BURST_CHARACTERS.contains(&character_name);
 
         // Try overview OCR first
-        let auto_lv = Self::parse_lv_text(&self.ocr_rect(CHAR_TALENT_OVERVIEW_AUTO)?);
-        let skill_lv = Self::parse_lv_text(&self.ocr_rect(CHAR_TALENT_OVERVIEW_SKILL)?);
+        let auto_lv = Self::parse_lv_text(&self.ocr_rect(ctrl, CHAR_TALENT_OVERVIEW_AUTO)?);
+        let skill_lv = Self::parse_lv_text(&self.ocr_rect(ctrl, CHAR_TALENT_OVERVIEW_SKILL)?);
         let burst_rect = if has_special {
             CHAR_TALENT_OVERVIEW_BURST_SPECIAL
         } else {
             CHAR_TALENT_OVERVIEW_BURST
         };
-        let burst_lv = Self::parse_lv_text(&self.ocr_rect(burst_rect)?);
+        let burst_lv = Self::parse_lv_text(&self.ocr_rect(ctrl, burst_rect)?);
 
         let mut auto = if auto_lv > 0 { auto_lv } else { 1 };
         let mut skill = if skill_lv > 0 { skill_lv } else { 1 };
@@ -344,18 +307,18 @@ impl GoodCharacterScanner {
 
             let mut is_first = true;
             if auto_lv == 0 {
-                auto = self.read_talent_by_click(0, is_first)?;
+                auto = self.read_talent_by_click(ctrl, 0, is_first)?;
                 is_first = false;
             }
             if skill_lv == 0 {
-                skill = self.read_talent_by_click(1, is_first)?;
+                skill = self.read_talent_by_click(ctrl, 1, is_first)?;
                 is_first = false;
             }
             if burst_lv == 0 {
                 let burst_index = if has_special { 3 } else { 2 };
-                burst = self.read_talent_by_click(burst_index, is_first)?;
+                burst = self.read_talent_by_click(ctrl, burst_index, is_first)?;
             }
-            self.system_control.key_press(enigo::Key::Escape).unwrap();
+            ctrl.key_press(enigo::Key::Escape);
             utils::sleep(500);
         }
 
@@ -372,12 +335,13 @@ impl GoodCharacterScanner {
     ///
     /// Port of `scanSingleCharacter()` from character_scanner.js
     fn scan_single_character(
-        &mut self,
+        &self,
+        ctrl: &mut GenshinGameController,
         first_name: &Option<String>,
         reverse: bool,
     ) -> Result<Option<GoodCharacter>> {
         // Name and element are visible from any tab
-        let (name, element, raw_text) = self.read_name_and_element()?;
+        let (name, element, raw_text) = self.read_name_and_element(ctrl)?;
 
         let name = match name {
             Some(n) => n,
@@ -403,16 +367,16 @@ impl GoodCharacterScanner {
 
         if !reverse {
             // Forward: attributes → constellation → talents (already on attributes tab)
-            level_info = self.read_level()?;
-            constellation = self.read_constellation_count(&name, &element)?;
-            talents = self.read_talent_levels(&name, false)?;
+            level_info = self.read_level(ctrl)?;
+            constellation = self.read_constellation_count(ctrl, &name, &element)?;
+            talents = self.read_talent_levels(ctrl, &name, false)?;
         } else {
             // Reverse: talents → constellation → attributes (already on talents tab)
-            talents = self.read_talent_levels(&name, true)?;
-            constellation = self.read_constellation_count(&name, &element)?;
-            self.click(CHAR_TAB_ATTRIBUTES.0, CHAR_TAB_ATTRIBUTES.1);
+            talents = self.read_talent_levels(ctrl, &name, true)?;
+            constellation = self.read_constellation_count(ctrl, &name, &element)?;
+            ctrl.click_at(CHAR_TAB_ATTRIBUTES.0, CHAR_TAB_ATTRIBUTES.1);
             utils::sleep(self.config.tab_delay as u32);
-            level_info = self.read_level()?;
+            level_info = self.read_level(ctrl)?;
         }
 
         let (level, ascended) = level_info;
@@ -470,12 +434,27 @@ impl GoodCharacterScanner {
     /// Detects loop completion when the first character is seen again.
     ///
     /// Port of `scanAllCharacters()` from character_scanner.js
-    pub fn scan(&mut self) -> Result<Vec<GoodCharacter>> {
+    /// Scan all characters.
+    ///
+    /// If `start_at_char > 0`, presses right arrow that many times to
+    /// jump to a specific character index before scanning.
+    pub fn scan(&self, ctrl: &mut GenshinGameController, start_at_char: usize) -> Result<Vec<GoodCharacter>> {
         info!("[character] starting scan...");
         let now = SystemTime::now();
 
         // Open character screen
-        navigation::open_character_screen(&mut self.system_control, self.config.open_delay);
+        ctrl.key_press(enigo::Key::Layout('c'));
+        utils::sleep((self.config.open_delay as f64 * 1.5) as u32);
+
+        // Jump to the specified character index
+        if start_at_char > 0 {
+            info!("[character] jumping to character index {}...", start_at_char);
+            for _ in 0..start_at_char {
+                ctrl.click_at(CHAR_NEXT_POS.0, CHAR_NEXT_POS.1);
+                utils::sleep((self.config.tab_delay / 2).max(100) as u32);
+            }
+            utils::sleep(self.config.tab_delay as u32);
+        }
 
         let mut characters: Vec<GoodCharacter> = Vec::new();
         let mut first_name: Option<String> = None;
@@ -488,7 +467,7 @@ impl GoodCharacterScanner {
                 break;
             }
 
-            let result = self.scan_single_character(&first_name, reverse);
+            let result = self.scan_single_character(ctrl, &first_name, reverse);
 
             match result {
                 Ok(Some(character)) => {
@@ -527,13 +506,13 @@ impl GoodCharacterScanner {
             }
 
             // Navigate to next character
-            self.click(CHAR_NEXT_POS.0, CHAR_NEXT_POS.1);
+            ctrl.click_at(CHAR_NEXT_POS.0, CHAR_NEXT_POS.1);
             utils::sleep(self.config.tab_delay as u32);
             reverse = !reverse;
         }
 
         // Close character screen
-        self.system_control.key_press(enigo::Key::Escape).unwrap();
+        ctrl.key_press(enigo::Key::Escape);
         utils::sleep(500);
 
         info!(
@@ -543,5 +522,86 @@ impl GoodCharacterScanner {
         );
 
         Ok(characters)
+    }
+
+    /// Debug scan the currently displayed character.
+    ///
+    /// Runs `scan_single_character` on whatever character is showing and
+    /// returns a `DebugScanResult` with timing info. Used by the re-scan
+    /// debug mode.
+    ///
+    /// The character screen must already be open and showing a character.
+    pub fn debug_scan_current(
+        &self,
+        ctrl: &mut GenshinGameController,
+    ) -> DebugScanResult {
+        use std::time::Instant;
+
+        let total_start = Instant::now();
+        let mut fields = Vec::new();
+
+        // Name + element
+        let t = Instant::now();
+        let (name, element, raw_text) = self.read_name_and_element(ctrl)
+            .unwrap_or((None, None, String::new()));
+        let name_key = name.unwrap_or_default();
+        fields.push(DebugOcrField {
+            field_name: "name".into(),
+            raw_text: raw_text,
+            parsed_value: format!("{} ({})", name_key, element.as_deref().unwrap_or("?")),
+            region: CHAR_NAME_RECT,
+            duration_ms: t.elapsed().as_millis() as u64,
+        });
+
+        // Level
+        let t = Instant::now();
+        let (level, ascended) = self.read_level(ctrl).unwrap_or((1, false));
+        let ascension = level_to_ascension(level, ascended);
+        fields.push(DebugOcrField {
+            field_name: "level".into(),
+            raw_text: String::new(),
+            parsed_value: format!("lv={} ascended={} asc={}", level, ascended, ascension),
+            region: CHAR_LEVEL_RECT,
+            duration_ms: t.elapsed().as_millis() as u64,
+        });
+
+        // Constellation
+        let t = Instant::now();
+        let constellation = self.read_constellation_count(ctrl, &name_key, &element)
+            .unwrap_or(0);
+        fields.push(DebugOcrField {
+            field_name: "constellation".into(),
+            raw_text: String::new(),
+            parsed_value: format!("C{}", constellation),
+            region: (0.0, 0.0, 0.0, 0.0),
+            duration_ms: t.elapsed().as_millis() as u64,
+        });
+
+        // Talents
+        let t = Instant::now();
+        let (auto, skill, burst) = self.read_talent_levels(ctrl, &name_key, false)
+            .unwrap_or((1, 1, 1));
+        fields.push(DebugOcrField {
+            field_name: "talents".into(),
+            raw_text: String::new(),
+            parsed_value: format!("{}/{}/{}", auto, skill, burst),
+            region: (0.0, 0.0, 0.0, 0.0),
+            duration_ms: t.elapsed().as_millis() as u64,
+        });
+
+        let character = GoodCharacter {
+            key: name_key,
+            level,
+            constellation,
+            ascension,
+            talent: GoodTalent { auto, skill, burst },
+        };
+        let parsed_json = serde_json::to_string_pretty(&character).unwrap_or_default();
+
+        DebugScanResult {
+            fields,
+            total_duration_ms: total_start.elapsed().as_millis() as u64,
+            parsed_json,
+        }
     }
 }

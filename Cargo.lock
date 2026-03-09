@@ -1616,15 +1616,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nanoid"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ffa00dec017b5b1a8b7cf5e2c008bfda1aa7e0697ac1508b491fdf2622fb4d8"
-dependencies = [
- "rand",
-]
-
-[[package]]
 name = "native-tls"
 version = "0.2.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1814,6 +1805,7 @@ version = "2.0.0-rc.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa7e49bd669d32d7bc2a15ec540a527e7764aec722a45467814005725bcd721"
 dependencies = [
+ "libloading",
  "ndarray",
  "ort-sys",
  "smallvec 2.0.0-alpha.10",
@@ -3906,44 +3898,8 @@ dependencies = [
  "indicatif-log-bridge",
  "log",
  "winres",
- "yas-wutheringwaves",
  "yas_core",
  "yas_scanner_genshin",
- "yas_scanner_starrail",
-]
-
-[[package]]
-name = "yas-derive-wuthering-waves"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "serde",
- "serde_json",
- "syn 2.0.106",
-]
-
-[[package]]
-name = "yas-wutheringwaves"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "edit-distance",
- "env_logger",
- "image",
- "lazy_static",
- "log",
- "nanoid",
- "rayon",
- "regex",
- "serde",
- "serde_json",
- "strum 0.26.3",
- "strum_macros 0.26.4",
- "yas-derive-wuthering-waves",
- "yas_core",
- "yas_derive",
 ]
 
 [[package]]
@@ -4020,27 +3976,6 @@ dependencies = [
  "strum 0.26.3",
  "strum_macros 0.26.4",
  "windows-capture",
- "yas_core",
- "yas_derive",
-]
-
-[[package]]
-name = "yas_scanner_starrail"
-version = "0.1.14"
-dependencies = [
- "anyhow",
- "clap",
- "edit-distance",
- "env_logger",
- "image",
- "lazy_static",
- "log",
- "nanoid",
- "regex",
- "serde",
- "serde_json",
- "strum 0.26.3",
- "strum_macros 0.26.4",
  "yas_core",
  "yas_derive",
 ]

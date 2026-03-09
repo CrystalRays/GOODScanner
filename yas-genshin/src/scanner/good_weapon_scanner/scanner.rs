@@ -6,19 +6,18 @@ use image::{GenericImageView, RgbImage};
 use log::{error, info, warn};
 use regex::Regex;
 
-use yas::capture::{Capturer, GenericCapturer};
-use yas::game_info::GameInfo;
-use yas::ocr::{ImageToText, PPOCRModel};
-use yas::system_control::SystemControl;
-use yas::utils;
+use yas::ocr::ImageToText;
 
 use super::GoodWeaponScannerConfig;
+use crate::scanner::good_common::backpack_scanner::{BackpackScanConfig, BackpackScanner, GridEvent, ScanAction};
 use crate::scanner::good_common::constants::*;
 use crate::scanner::good_common::coord_scaler::CoordScaler;
 use crate::scanner::good_common::fuzzy_match::fuzzy_match_map;
+use crate::scanner::good_common::game_controller::GenshinGameController;
 use crate::scanner::good_common::mappings::MappingManager;
-use crate::scanner::good_common::models::GoodWeapon;
+use crate::scanner::good_common::models::{DebugOcrField, DebugScanResult, GoodWeapon};
 use crate::scanner::good_common::navigation;
+use crate::scanner::good_common::ocr_factory;
 use crate::scanner::good_common::pixel_utils;
 use crate::scanner::good_common::stat_parser::level_to_ascension;
 
@@ -66,12 +65,12 @@ impl WeaponOcrRegions {
 ///
 /// Scans weapons from the backpack grid, detecting name/level/refinement/equip
 /// via OCR on captured game images. Stops when low-tier weapons are reached.
+///
+/// The scanner holds only business logic (OCR model, mappings, config).
+/// The game controller is passed to `scan()` to avoid borrow checker conflicts
+/// with `BackpackScanner`.
 pub struct GoodWeaponScanner {
     config: GoodWeaponScannerConfig,
-    game_info: GameInfo,
-    scaler: CoordScaler,
-    capturer: Rc<dyn Capturer<RgbImage>>,
-    system_control: SystemControl,
     ocr_model: Box<dyn ImageToText<RgbImage> + Send>,
     mappings: Rc<MappingManager>,
     ocr_regions: WeaponOcrRegions,
@@ -92,42 +91,14 @@ enum WeaponScanResult {
 }
 
 impl GoodWeaponScanner {
-    fn get_image_to_text(backend: &str) -> Result<Box<dyn ImageToText<RgbImage> + Send>> {
-        match backend.to_lowercase().as_str() {
-            "paddlev3" | "ppocrv3" => {
-                let model_bytes = include_bytes!("../character_scanner/models/ch_PP-OCRv3_rec_infer.onnx");
-                let dict_str = include_str!("../character_scanner/models/ppocr_keys_v1.txt");
-                let mut dict_vec: Vec<String> = dict_str.lines().map(|l| l.trim().to_string()).collect();
-                dict_vec.push(String::from(" "));
-                let model = PPOCRModel::new(model_bytes, dict_vec)?;
-                Ok(Box::new(model))
-            }
-            _ => {
-                let model_bytes = include_bytes!("../character_scanner/models/PP-OCRv5_mobile_rec.onnx");
-                let dict_str = include_str!("../character_scanner/models/ppocrv5_dict.txt");
-                let mut dict_vec: Vec<String> = dict_str.lines().map(|l| l.trim().to_string()).collect();
-                dict_vec.push(String::from(" "));
-                let model = PPOCRModel::new(model_bytes, dict_vec)?;
-                Ok(Box::new(model))
-            }
-        }
-    }
-
     pub fn new(
         config: GoodWeaponScannerConfig,
-        game_info: GameInfo,
         mappings: Rc<MappingManager>,
     ) -> Result<Self> {
-        let ocr_model = Self::get_image_to_text(&config.ocr_backend)?;
-        let window_size = game_info.window.to_rect_usize().size();
-        let scaler = CoordScaler::new(window_size.width as u32, window_size.height as u32);
+        let ocr_model = ocr_factory::create_ocr_model(&config.ocr_backend)?;
 
         Ok(Self {
             config,
-            game_info,
-            scaler,
-            capturer: Rc::new(GenericCapturer::new()?),
-            system_control: SystemControl::new(),
             ocr_model,
             mappings,
             ocr_regions: WeaponOcrRegions::new(),
@@ -142,12 +113,13 @@ impl GoodWeaponScanner {
         &self,
         image: &RgbImage,
         rect: (f64, f64, f64, f64),
+        scaler: &CoordScaler,
     ) -> Result<String> {
         let (bx, by, bw, bh) = rect;
-        let x = self.scaler.x(bx) as u32;
-        let y = self.scaler.y(by) as u32;
-        let w = self.scaler.x(bw) as u32;
-        let h = self.scaler.y(bh) as u32;
+        let x = scaler.x(bx) as u32;
+        let y = scaler.y(by) as u32;
+        let w = scaler.x(bw) as u32;
+        let h = scaler.y(bh) as u32;
 
         // Clamp to image bounds
         let x = x.min(image.width().saturating_sub(1));
@@ -164,17 +136,12 @@ impl GoodWeaponScanner {
         Ok(text.trim().to_string())
     }
 
-    /// Capture the full game window
-    fn capture_game(&self) -> Result<RgbImage> {
-        navigation::capture_game_region(&self.game_info, self.capturer.as_ref())
-    }
-
     /// Scan a single weapon from a captured game image.
     ///
     /// Port of `scanSingleWeapon()` from GOODScanner/lib/weapon_scanner.js
-    fn scan_single_weapon(&self, image: &RgbImage) -> Result<WeaponScanResult> {
+    fn scan_single_weapon(&self, image: &RgbImage, scaler: &CoordScaler) -> Result<WeaponScanResult> {
         // OCR weapon name
-        let name_text = self.ocr_image_region(image, self.ocr_regions.name)?;
+        let name_text = self.ocr_image_region(image, self.ocr_regions.name, scaler)?;
         let weapon_key = fuzzy_match_map(&name_text, &self.mappings.weapon_name_map);
 
         if weapon_key.is_none() {
@@ -186,7 +153,7 @@ impl GoodWeaponScanner {
                 }
             }
 
-            if pixel_utils::detect_weapon_rarity(image, &self.scaler) <= 2 {
+            if pixel_utils::detect_weapon_rarity(image, scaler) <= 2 {
                 info!("[weapon] detected low-star item, stopping");
                 return Ok(WeaponScanResult::Stop);
             }
@@ -201,20 +168,20 @@ impl GoodWeaponScanner {
         let weapon_key = weapon_key.unwrap();
 
         // OCR level
-        let level_text = self.ocr_image_region(image, self.ocr_regions.level)?;
+        let level_text = self.ocr_image_region(image, self.ocr_regions.level, scaler)?;
         let (level, ascended) = Self::parse_weapon_level(&level_text);
 
         // OCR refinement
-        let ref_text = self.ocr_image_region(image, self.ocr_regions.refinement)?;
+        let ref_text = self.ocr_image_region(image, self.ocr_regions.refinement, scaler)?;
         let refinement = Self::parse_refinement(&ref_text);
 
         // OCR equip status
-        let equip_text = self.ocr_image_region(image, self.ocr_regions.equip)?;
+        let equip_text = self.ocr_image_region(image, self.ocr_regions.equip, scaler)?;
         let location = self.parse_equip_location(&equip_text);
 
         // Pixel-based detections
-        let rarity = pixel_utils::detect_weapon_rarity(image, &self.scaler);
-        let lock = pixel_utils::detect_weapon_lock(image, &self.scaler);
+        let rarity = pixel_utils::detect_weapon_rarity(image, scaler);
+        let lock = pixel_utils::detect_weapon_lock(image, scaler);
         let ascension = level_to_ascension(level, ascended);
 
         Ok(WeaponScanResult::Weapon(GoodWeapon {
@@ -307,29 +274,29 @@ impl GoodWeaponScanner {
 
     /// Scan all weapons from the backpack.
     ///
-    /// Port of `scanAllWeapons()` from GOODScanner/lib/weapon_scanner.js
-    pub fn scan(&mut self, skip_open_backpack: bool) -> Result<Vec<GoodWeapon>> {
+    /// Uses `BackpackScanner` for grid traversal with panel-load detection
+    /// and adaptive scrolling. The controller is passed in to avoid borrow
+    /// conflicts between BackpackScanner and the scan callback.
+    ///
+    /// If `start_at > 0`, skips directly to that item index.
+    pub fn scan(
+        &self,
+        ctrl: &mut GenshinGameController,
+        skip_open_backpack: bool,
+        start_at: usize,
+    ) -> Result<Vec<GoodWeapon>> {
         info!("[weapon] starting scan...");
         let now = SystemTime::now();
 
+        let mut bp = BackpackScanner::new(ctrl);
+
         if !skip_open_backpack {
-            navigation::open_backpack(&mut self.system_control, self.config.open_delay);
+            bp.open_backpack(self.config.open_delay);
         }
-        navigation::select_backpack_tab(
-            "weapon",
-            &self.game_info,
-            &self.scaler,
-            &mut self.system_control,
-            self.config.delay_tab,
-        );
+        bp.select_tab("weapon", self.config.delay_tab);
 
         // Read item count
-        let (_, total_count) = navigation::read_item_count(
-            &self.game_info,
-            &self.scaler,
-            self.capturer.as_ref(),
-            self.ocr_model.as_ref(),
-        )?;
+        let (_, total_count) = bp.read_item_count(self.ocr_model.as_ref())?;
 
         if total_count == 0 {
             warn!("[weapon] no weapons in backpack");
@@ -339,91 +306,52 @@ impl GoodWeaponScanner {
 
         let mut weapons: Vec<GoodWeapon> = Vec::new();
 
-        // Inline grid traversal to avoid borrow checker issues with closures
-        let total = total_count as usize;
-        let items_per_page = GRID_COLS * GRID_ROWS;
-        let page_count = (total + items_per_page - 1) / items_per_page;
-        let mut item_index = 0;
-        let mut scroll_count = 0i32;
+        let scan_config = BackpackScanConfig {
+            delay_grid_item: self.config.delay_grid_item,
+            delay_scroll: self.config.delay_scroll,
+        };
 
-        'outer: for page in 0..page_count {
-            let mut start_row = 0;
-            let remaining = total.saturating_sub(page * items_per_page);
+        // Clone the scaler so the callback can use it without borrowing ctrl
+        let scaler = bp.scaler().clone();
 
-            if remaining < items_per_page {
-                let row_count = (remaining + GRID_COLS - 1) / GRID_COLS;
-                start_row = GRID_ROWS.saturating_sub(row_count);
-                info!(
-                    "[weapon] last page: remaining={} rowCount={} startRow={} page={}/{}",
-                    remaining, row_count, start_row, page, page_count
-                );
-            }
+        bp.scan_grid(
+            total_count as usize,
+            &scan_config,
+            start_at,
+            |event| {
+                let image = match event {
+                    GridEvent::Item(_, img) => img,
+                    GridEvent::PageScrolled => return ScanAction::Continue,
+                };
 
-            for row in start_row..GRID_ROWS {
-                for col in 0..GRID_COLS {
-                    if item_index >= total || utils::is_rmb_down() {
-                        break 'outer;
+                match self.scan_single_weapon(image, &scaler) {
+                    Ok(WeaponScanResult::Weapon(weapon)) => {
+                        if weapon.rarity >= self.config.min_rarity {
+                            if self.config.log_progress {
+                                info!(
+                                    "[weapon] {} Lv.{} R{} {}{}",
+                                    weapon.key, weapon.level, weapon.refinement,
+                                    if weapon.location.is_empty() { "-" } else { &weapon.location },
+                                    if weapon.lock { " locked" } else { "" }
+                                );
+                            }
+                            weapons.push(weapon);
+                        }
+                        ScanAction::Continue
                     }
-
-                    navigation::click_grid_item(
-                        row, col, &self.game_info, &self.scaler,
-                        &mut self.system_control, self.config.delay_grid_item,
-                    );
-                    utils::sleep((self.config.delay_grid_item / 3).max(1) as u32);
-
-                    let image = match navigation::capture_game_region(
-                        &self.game_info, self.capturer.as_ref(),
-                    ) {
-                        Ok(img) => img,
-                        Err(e) => {
-                            error!("[weapon] capture failed: {}", e);
-                            item_index += 1;
-                            continue;
-                        }
-                    };
-
-                    match self.scan_single_weapon(&image) {
-                        Ok(WeaponScanResult::Weapon(weapon)) => {
-                            if weapon.rarity >= self.config.min_rarity {
-                                if self.config.log_progress {
-                                    info!(
-                                        "[weapon] {} Lv.{} R{} {}{}",
-                                        weapon.key, weapon.level, weapon.refinement,
-                                        if weapon.location.is_empty() { "-" } else { &weapon.location },
-                                        if weapon.lock { " locked" } else { "" }
-                                    );
-                                }
-                                weapons.push(weapon);
-                            }
-                        }
-                        Ok(WeaponScanResult::Stop) => {
-                            break 'outer;
-                        }
-                        Ok(WeaponScanResult::Skip) => {}
-                        Err(e) => {
-                            error!("[weapon] scan error: {}", e);
-                            if !self.config.continue_on_failure {
-                                break 'outer;
-                            }
+                    Ok(WeaponScanResult::Stop) => ScanAction::Stop,
+                    Ok(WeaponScanResult::Skip) => ScanAction::Continue,
+                    Err(e) => {
+                        error!("[weapon] scan error: {}", e);
+                        if self.config.continue_on_failure {
+                            ScanAction::Continue
+                        } else {
+                            ScanAction::Stop
                         }
                     }
-
-                    item_index += 1;
                 }
-            }
-
-            // Scroll to next page
-            if page < page_count - 1 {
-                navigation::move_to(
-                    &self.game_info, &self.scaler, &mut self.system_control,
-                    GRID_FIRST_X, GRID_FIRST_Y,
-                );
-                utils::sleep(100);
-                navigation::scroll_grid_page(
-                    &mut self.system_control, &mut scroll_count, self.config.delay_scroll,
-                );
-            }
-        }
+            },
+        );
 
         info!(
             "[weapon] complete, {} weapons scanned in {:?}",
@@ -432,5 +360,103 @@ impl GoodWeaponScanner {
         );
 
         Ok(weapons)
+    }
+
+    /// Debug scan a single weapon from a captured image.
+    ///
+    /// Returns detailed per-field OCR results including raw text, parsed values,
+    /// and timing information. Used by the re-scan debug mode.
+    pub fn debug_scan_single(
+        &self,
+        image: &RgbImage,
+        scaler: &CoordScaler,
+    ) -> DebugScanResult {
+        use std::time::Instant;
+
+        let total_start = Instant::now();
+        let mut fields = Vec::new();
+
+        // Name
+        let t = Instant::now();
+        let name_text = self.ocr_image_region(image, self.ocr_regions.name, scaler)
+            .unwrap_or_default();
+        let name_key = fuzzy_match_map(&name_text, &self.mappings.weapon_name_map)
+            .unwrap_or_default();
+        fields.push(DebugOcrField {
+            field_name: "name".into(),
+            raw_text: name_text,
+            parsed_value: name_key.clone(),
+            region: self.ocr_regions.name,
+            duration_ms: t.elapsed().as_millis() as u64,
+        });
+
+        // Level
+        let t = Instant::now();
+        let level_text = self.ocr_image_region(image, self.ocr_regions.level, scaler)
+            .unwrap_or_default();
+        let (level, ascended) = Self::parse_weapon_level(&level_text);
+        fields.push(DebugOcrField {
+            field_name: "level".into(),
+            raw_text: level_text,
+            parsed_value: format!("lv={} ascended={}", level, ascended),
+            region: self.ocr_regions.level,
+            duration_ms: t.elapsed().as_millis() as u64,
+        });
+
+        // Refinement
+        let t = Instant::now();
+        let ref_text = self.ocr_image_region(image, self.ocr_regions.refinement, scaler)
+            .unwrap_or_default();
+        let refinement = Self::parse_refinement(&ref_text);
+        fields.push(DebugOcrField {
+            field_name: "refinement".into(),
+            raw_text: ref_text,
+            parsed_value: format!("R{}", refinement),
+            region: self.ocr_regions.refinement,
+            duration_ms: t.elapsed().as_millis() as u64,
+        });
+
+        // Equip
+        let t = Instant::now();
+        let equip_text = self.ocr_image_region(image, self.ocr_regions.equip, scaler)
+            .unwrap_or_default();
+        let location = self.parse_equip_location(&equip_text);
+        fields.push(DebugOcrField {
+            field_name: "equip".into(),
+            raw_text: equip_text,
+            parsed_value: if location.is_empty() { "(none)".into() } else { location.clone() },
+            region: self.ocr_regions.equip,
+            duration_ms: t.elapsed().as_millis() as u64,
+        });
+
+        // Pixel detections (not OCR but still timed)
+        let t = Instant::now();
+        let rarity = pixel_utils::detect_weapon_rarity(image, scaler);
+        let lock = pixel_utils::detect_weapon_lock(image, scaler);
+        let ascension = level_to_ascension(level, ascended);
+        fields.push(DebugOcrField {
+            field_name: "pixel_detect".into(),
+            raw_text: String::new(),
+            parsed_value: format!("rarity={} lock={} ascension={}", rarity, lock, ascension),
+            region: (0.0, 0.0, 0.0, 0.0),
+            duration_ms: t.elapsed().as_millis() as u64,
+        });
+
+        let weapon = GoodWeapon {
+            key: name_key,
+            level,
+            ascension,
+            refinement,
+            rarity,
+            location,
+            lock,
+        };
+        let parsed_json = serde_json::to_string_pretty(&weapon).unwrap_or_default();
+
+        DebugScanResult {
+            fields,
+            total_duration_ms: total_start.elapsed().as_millis() as u64,
+            parsed_json,
+        }
     }
 }

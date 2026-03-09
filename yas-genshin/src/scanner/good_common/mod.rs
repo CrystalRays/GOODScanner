@@ -6,3 +6,7 @@ pub mod stat_parser;
 pub mod pixel_utils;
 pub mod mappings;
 pub mod navigation;
+pub mod game_controller;
+pub mod backpack_scanner;
+pub mod ocr_factory;
+pub mod diff;
