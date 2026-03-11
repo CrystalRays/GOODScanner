@@ -28,7 +28,7 @@ pub struct GoodWeapon {
     pub level: i32,
     pub ascension: i32,
     pub refinement: i32,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub rarity: i32,
     pub location: String,
     pub lock: bool,

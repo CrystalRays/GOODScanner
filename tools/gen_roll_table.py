@@ -1,7 +1,12 @@
-"""Generate Rust lookup table from rollTable.json"""
-import json
+"""Generate Rust lookup table from rollTable.json
 
-with open('rollTable.json') as f:
+Run from project root: python tools/gen_roll_table.py > yas-genshin/src/scanner/good_common/roll_table.rs
+"""
+import json
+import os
+
+_dir = os.path.dirname(os.path.abspath(__file__))
+with open(os.path.join(_dir, 'rollTable.json')) as f:
     rt = json.load(f)
 
 PROP_TO_GOOD = {

@@ -15,5 +15,5 @@ env_logger = "0.11"
 winres = "0.1"
 
 [[bin]]
-name = "yas"
+name = "GOODScanner"
 path = "src/bin/yas.rs"
