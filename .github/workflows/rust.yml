@@ -1,4 +1,4 @@
-name: Build executables
+name: Build and Release
 
 on:
   push:
@@ -8,6 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -47,8 +50,20 @@ jobs:
         run: |
           Move-Item ./target/release/GOODScanner.exe "GOODScanner_$env:GIT_REV.exe"
 
-      - name: Upload GOODScanner
+      - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
           name: GOODScanner_${{ env.GIT_REV }}
           path: GOODScanner_${{ env.GIT_REV }}.exe
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.GIT_REV }}
+          name: GOODScanner ${{ env.GIT_REV }}
+          body: |
+            Automated build from commit ${{ github.sha }}
+
+            **Download:** `GOODScanner_${{ env.GIT_REV }}.exe`
+          files: GOODScanner_${{ env.GIT_REV }}.exe
+          make_latest: true
