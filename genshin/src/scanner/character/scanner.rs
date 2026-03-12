@@ -487,11 +487,11 @@ impl GoodCharacterScanner {
             }
         }
 
-        // Dismiss the constellation detail popup by clicking on a non-interactive
-        // area of the character screen. The top-right currency area is safe —
-        // no buttons or interactive elements there.
-        ctrl.click_at(1600.0, 30.0);
-        utils::sleep((self.config.tab_delay / 2) as u32);
+        // Dismiss the constellation detail popup with Escape.
+        // Do NOT click_at(1600, 30) — that hits the mora display and can
+        // trigger unintended navigation.
+        ctrl.key_press(enigo::Key::Escape);
+        utils::sleep(self.config.tab_delay as u32);
 
         Ok(constellation)
     }
