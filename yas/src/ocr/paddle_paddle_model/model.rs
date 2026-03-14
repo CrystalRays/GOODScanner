@@ -49,10 +49,14 @@ impl PPOCRModel {
         let index_to_word = parse_index_to_word(&words_str, true);
 
         #[cfg(feature = "ort")]
-        let session = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(1)?
-            .commit_from_file(onnx_file)?;
+        let session = Session::builder()
+            .map_err(|e| anyhow::anyhow!("Failed to create session builder: {:?}", e))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow::anyhow!("Failed to set optimization level: {:?}", e))?
+            .with_intra_threads(1)
+            .map_err(|e| anyhow::anyhow!("Failed to set intra threads: {:?}", e))?
+            .commit_from_file(onnx_file)
+            .map_err(|e| anyhow::anyhow!("Failed to commit session from file: {:?}", e))?;
 
         #[cfg(feature = "tract_onnx")]
         let model = {
@@ -77,10 +81,14 @@ impl PPOCRModel {
 
     pub fn new(onnx: &[u8], index_to_word: Vec<String>) -> Result<Self> {
         #[cfg(feature = "ort")]
-        let session = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(1)?
-            .commit_from_memory(onnx)?;
+        let session = Session::builder()
+            .map_err(|e| anyhow::anyhow!("Failed to create session builder: {:?}", e))?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .map_err(|e| anyhow::anyhow!("Failed to set optimization level: {:?}", e))?
+            .with_intra_threads(1)
+            .map_err(|e| anyhow::anyhow!("Failed to set intra threads: {:?}", e))?
+            .commit_from_memory(onnx)
+            .map_err(|e| anyhow::anyhow!("Failed to commit session from memory: {:?}", e))?;
 
         #[cfg(feature = "tract_onnx")]
         let model = {
